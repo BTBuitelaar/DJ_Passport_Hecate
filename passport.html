@@ -64,25 +64,17 @@ align-items: center;
 justify-content: center;
 padding: 18px 32px;
 border-radius: 22px;
-}
-
-.glass-canvas {
-position: absolute;
-top: 0;
-left: 0;
-width: 100%;
-height: 100%;
-display: block;
-z-index: 1;
-pointer-events: none;
-}
-
-.glass-chip {
 border: 1px solid rgba(255, 255, 255, 0.45);
 box-shadow: 0 8px 32px rgba(31, 38, 135, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.4);
-background: rgba(255, 255, 255, 0.18);
-backdrop-filter: blur(6px) saturate(180%);
--webkit-backdrop-filter: blur(6px) saturate(180%);
+background: rgba(255, 255, 255, 0.10);
+backdrop-filter: url(#liquidGlassFilter) saturate(160%);
+-webkit-backdrop-filter: blur(6px) saturate(160%);
+}
+
+@supports not (backdrop-filter: blur(1px)) {
+.glass-chip {
+background: rgba(255, 255, 255, 0.55);
+}
 }
 
 .passport-logo-overlay {
@@ -213,9 +205,22 @@ letter-spacing: 1px;
 <video autoplay muted loop playsinline disablePictureInPicture controlsList="nodownload nofullscreen noremoteplayback">
 <source src="passport-header-video.mp4" type="video/mp4">
 </video>
+<svg width="0" height="0" style="position:absolute;overflow:hidden">
+<filter id="liquidGlassFilter" x="-25%" y="-25%" width="150%" height="150%" primitiveUnits="objectBoundingBox" color-interpolation-filters="sRGB">
+<feImage id="glassDisplacementMap" x="0" y="0" width="1" height="1" preserveAspectRatio="none" result="map"/>
+<feGaussianBlur in="SourceGraphic" stdDeviation="0.02" result="blurred"/>
+<feDisplacementMap in="blurred" in2="map" scale="0.05" xChannelSelector="R" yChannelSelector="G" result="dispG"/>
+<feDisplacementMap in="blurred" in2="map" scale="0.065" xChannelSelector="R" yChannelSelector="G" result="dispR"/>
+<feDisplacementMap in="blurred" in2="map" scale="0.035" xChannelSelector="R" yChannelSelector="G" result="dispB"/>
+<feColorMatrix in="dispR" type="matrix" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0" result="rOnly"/>
+<feColorMatrix in="dispG" type="matrix" values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0" result="gOnly"/>
+<feColorMatrix in="dispB" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0" result="bOnly"/>
+<feBlend in="rOnly" in2="gOnly" mode="screen" result="rgBlend"/>
+<feBlend in="rgBlend" in2="bOnly" mode="screen"/>
+</filter>
+</svg>
 <div class="glass-chip" id="glassChip">
-<canvas class="glass-canvas" id="glassCanvas"></canvas>
-<img src="doric-logo-text.png" alt="Doric Jewelry" class="passport-logo-overlay">
+<img src="doric-logo-text.png" alt="Doric Jewelry" class="passport-logo-overlay" fetchpriority="high" decoding="sync">
 </div>
 </div>
 
@@ -258,256 +263,118 @@ letter-spacing: 1px;
 
 <script>
 (function() {
-  var wrapper = document.querySelector('.header-video-wrapper');
-  var video = wrapper.querySelector('video');
-  var chip = document.getElementById('glassChip');
-  var canvas = document.getElementById('glassCanvas');
-  var gl = canvas.getContext('webgl2');
+var chip = document.getElementById('glassChip');
+var feImage = document.getElementById('glassDisplacementMap');
 
-  if (!gl) {
-    chip.classList.add('no-webgl');
-    canvas.style.display = 'none';
-    return;
-  }
+function clamp8(v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
 
-  var vsSource = [
-    '#version 300 es',
-    'in vec2 a_pos;',
-    'void main() {',
-    '  gl_Position = vec4(a_pos, 0.0, 1.0);',
-    '}'
-  ].join('\n');
+function roundRectPath(ctx, x, y, w, h, r) {
+r = Math.max(0, Math.min(r, w / 2, h / 2));
+ctx.beginPath();
+ctx.moveTo(x + r, y);
+ctx.arcTo(x + w, y, x + w, y + h, r);
+ctx.arcTo(x + w, y + h, x, y + h, r);
+ctx.arcTo(x, y + h, x, y, r);
+ctx.arcTo(x, y, x + w, y, r);
+ctx.closePath();
+}
 
-  var fsSource = [
-    '#version 300 es',
-    'precision highp float;',
-    'uniform vec2 u_canvasSize;',
-    'uniform float u_radius;',
-    'uniform float u_edgeThickness;',
-    'uniform float u_refractStrength;',
-    'uniform float u_dispersion;',
-    'uniform float u_fresnelIntensity;',
-    'uniform float u_blurRadius;',
-    'uniform sampler2D u_videoTex;',
-    'uniform vec2 u_renderedVideoSize;',
-    'uniform vec2 u_videoOffset;',
-    'uniform vec2 u_chipOffset;',
-    'out vec4 fragColor;',
-    '',
-    'float sdRoundRect(vec2 p, vec2 halfSize, float r) {',
-    '  vec2 d = abs(p) - halfSize + r;',
-    '  return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;',
-    '}',
-    '',
-    'vec2 sdNormal(vec2 p, vec2 halfSize, float r) {',
-    '  float eps = 1.0;',
-    '  float dx = sdRoundRect(p + vec2(eps, 0.0), halfSize, r) - sdRoundRect(p - vec2(eps, 0.0), halfSize, r);',
-    '  float dy = sdRoundRect(p + vec2(0.0, eps), halfSize, r) - sdRoundRect(p - vec2(0.0, eps), halfSize, r);',
-    '  vec2 n = vec2(dx, dy);',
-    '  float len = length(n);',
-    '  return len > 0.0001 ? n / len : vec2(0.0);',
-    '}',
-    '',
-    'vec3 sampleVideoAt(vec2 uv) {',
-    '  return texture(u_videoTex, clamp(uv, 0.0, 1.0)).rgb;',
-    '}',
-    '',
-    'vec3 sampleVideo(vec2 wrapperPx, float blurPx) {',
-    '  vec2 uv = (wrapperPx + u_videoOffset) / u_renderedVideoSize;',
-    '  uv.y = 1.0 - uv.y;',
-    '  vec2 texel = blurPx / u_renderedVideoSize;',
-    '  vec3 sum = sampleVideoAt(uv) * 4.0;',
-    '  sum += sampleVideoAt(uv + vec2(texel.x, 0.0));',
-    '  sum += sampleVideoAt(uv - vec2(texel.x, 0.0));',
-    '  sum += sampleVideoAt(uv + vec2(0.0, texel.y));',
-    '  sum += sampleVideoAt(uv - vec2(0.0, texel.y));',
-    '  sum += sampleVideoAt(uv + texel) * 0.7;',
-    '  sum += sampleVideoAt(uv - texel) * 0.7;',
-    '  sum += sampleVideoAt(uv + vec2(texel.x, -texel.y)) * 0.7;',
-    '  sum += sampleVideoAt(uv + vec2(-texel.x, texel.y)) * 0.7;',
-    '  return sum / 9.8;',
-    '}',
-    '',
-    'void main() {',
-    '  vec2 fragPx = gl_FragCoord.xy;',
-    '  vec2 p_topleft = vec2(fragPx.x, u_canvasSize.y - fragPx.y);',
-    '  vec2 center = u_canvasSize * 0.5;',
-    '  vec2 p = p_topleft - center;',
-    '  vec2 halfSize = u_canvasSize * 0.5;',
-    '  float dist = sdRoundRect(p, halfSize, u_radius);',
-    '',
-    '  float alpha = smoothstep(1.5, -1.5, dist);',
-    '  if (alpha < 0.003) { fragColor = vec4(0.0); return; }',
-    '',
-    '  vec2 normal = sdNormal(p, halfSize, u_radius);',
-    '  float insideDist = -dist;',
-    '  float edgeFactor = clamp(1.0 - insideDist / u_edgeThickness, 0.0, 1.0);',
-    '  edgeFactor = edgeFactor * edgeFactor * (3.0 - 2.0 * edgeFactor);',
-    '',
-    '  vec2 wrapperPx = u_chipOffset + p_topleft;',
-    '  vec2 refractOffset = normal * edgeFactor * u_refractStrength;',
-    '  float blurPx = mix(u_blurRadius, u_blurRadius * 0.12, edgeFactor);',
-    '  vec2 baseSamplePx = wrapperPx + refractOffset;',
-    '  float dOff = edgeFactor * u_dispersion;',
-    '',
-    '  vec3 colR = sampleVideo(baseSamplePx + normal * dOff * 1.6, blurPx);',
-    '  vec3 colG = sampleVideo(baseSamplePx, blurPx);',
-    '  vec3 colB = sampleVideo(baseSamplePx - normal * dOff * 1.6, blurPx);',
-    '  vec3 col = vec3(colR.r, colG.g, colB.b);',
-    '',
-    '  col = mix(col, vec3(1.0), 0.05);',
-    '  float fresnel = pow(edgeFactor, 4.0) * u_fresnelIntensity;',
-    '  col = mix(col, vec3(1.0), fresnel);',
-    '',
-    '  fragColor = vec4(col, alpha);',
-    '}'
-  ].join('\n');
+function buildMap() {
+var chipRect = chip.getBoundingClientRect();
+if (chipRect.width < 2 || chipRect.height < 2) return;
+var w = Math.max(2, Math.round(chipRect.width));
+var h = Math.max(2, Math.round(chipRect.height));
+var radius = parseFloat(getComputedStyle(chip).borderRadius) || 20;
+var edge = Math.max(6, radius * 0.9);
 
-  function compileShader(type, source) {
-    var shader = gl.createShader(type);
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      console.error('Shader compile error:', gl.getShaderInfoLog(shader));
-      gl.deleteShader(shader);
-      return null;
-    }
-    return shader;
-  }
+var mask = document.createElement('canvas');
+mask.width = w; mask.height = h;
+var mctx = mask.getContext('2d');
+mctx.fillStyle = '#000';
+mctx.fillRect(0, 0, w, h);
+mctx.fillStyle = '#fff';
+roundRectPath(mctx, edge, edge, w - edge * 2, h - edge * 2, Math.max(1, radius - edge));
+mctx.fill();
 
-  var vs = compileShader(gl.VERTEX_SHADER, vsSource);
-  var fs = compileShader(gl.FRAGMENT_SHADER, fsSource);
-  if (!vs || !fs) { chip.classList.add('no-webgl'); canvas.style.display = 'none'; return; }
+var blurred = document.createElement('canvas');
+blurred.width = w; blurred.height = h;
+var bctx = blurred.getContext('2d');
+bctx.filter = 'blur(' + Math.max(2, edge * 0.6) + 'px)';
+bctx.drawImage(mask, 0, 0);
 
-  var program = gl.createProgram();
-  gl.attachShader(program, vs);
-  gl.attachShader(program, fs);
-  gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    console.error('Program link error:', gl.getProgramInfoLog(program));
-    chip.classList.add('no-webgl');
-    canvas.style.display = 'none';
-    return;
-  }
-  gl.useProgram(program);
+var srcData;
+try { srcData = bctx.getImageData(0, 0, w, h).data; } catch (e) { return; }
 
-  var quad = new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]);
-  var buf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
-  var aPos = gl.getAttribLocation(program, 'a_pos');
-  gl.enableVertexAttribArray(aPos);
-  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+var out = document.createElement('canvas');
+out.width = w; out.height = h;
+var octx = out.getContext('2d');
+var outImg = octx.createImageData(w, h);
+var od = outImg.data;
+var strength = 3.2;
 
-  var uCanvasSize = gl.getUniformLocation(program, 'u_canvasSize');
-  var uRadius = gl.getUniformLocation(program, 'u_radius');
-  var uEdgeThickness = gl.getUniformLocation(program, 'u_edgeThickness');
-  var uRefractStrength = gl.getUniformLocation(program, 'u_refractStrength');
-  var uDispersion = gl.getUniformLocation(program, 'u_dispersion');
-  var uFresnelIntensity = gl.getUniformLocation(program, 'u_fresnelIntensity');
-  var uBlurRadius = gl.getUniformLocation(program, 'u_blurRadius');
-  var uVideoTex = gl.getUniformLocation(program, 'u_videoTex');
-  var uRenderedVideoSize = gl.getUniformLocation(program, 'u_renderedVideoSize');
-  var uVideoOffset = gl.getUniformLocation(program, 'u_videoOffset');
-  var uChipOffset = gl.getUniformLocation(program, 'u_chipOffset');
+function lum(x, y) {
+x = x < 0 ? 0 : (x >= w ? w - 1 : x);
+y = y < 0 ? 0 : (y >= h ? h - 1 : y);
+return srcData[(y * w + x) * 4];
+}
 
-  var tex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+for (var y = 0; y < h; y++) {
+for (var x = 0; x < w; x++) {
+var dx = (lum(x + 1, y) - lum(x - 1, y)) / 2;
+var dy = (lum(x, y + 1) - lum(x, y - 1)) / 2;
+var idx = (y * w + x) * 4;
+od[idx] = clamp8(128 + dx * strength);
+od[idx + 1] = clamp8(128 + dy * strength);
+od[idx + 2] = 128;
+od[idx + 3] = 255;
+}
+}
+octx.putImageData(outImg, 0, 0);
+var dataUrl = out.toDataURL();
+feImage.setAttributeNS('http://www.w3.org/1999/xlink', 'href', dataUrl);
+feImage.setAttribute('href', dataUrl);
+}
 
-  var geo = {
-    renderedVideoSize: [1,1],
-    videoOffset: [0,0],
-    chipOffset: [0,0],
-    canvasWidth: 1,
-    canvasHeight: 1,
-    radius: 28,
-    edgeThickness: 16,
-    refractStrength: 10,
-    dispersion: 2.2,
-    blurRadius: 9
-  };
+var resizeTimer;
+window.addEventListener('resize', function() {
+clearTimeout(resizeTimer);
+resizeTimer = setTimeout(buildMap, 120);
+});
 
-  function updateGeometry() {
-    var wrapperRect = wrapper.getBoundingClientRect();
-    var chipRect = chip.getBoundingClientRect();
-    var dpr = window.devicePixelRatio || 1;
+buildMap();
+})();
 
-    var cw = Math.max(1, Math.round(chipRect.width * dpr));
-    var ch = Math.max(1, Math.round(chipRect.height * dpr));
-    if (canvas.width !== cw) canvas.width = cw;
-    if (canvas.height !== ch) canvas.height = ch;
+(function() {
+var logoImg = document.querySelector('.passport-logo-overlay');
 
-    var vw = video.videoWidth, vh = video.videoHeight;
-    if (vw && vh) {
-      var wrapperW = wrapperRect.width, wrapperH = wrapperRect.height;
-      var scale = Math.max(wrapperW / vw, wrapperH / vh);
-      var renderedW = vw * scale * dpr;
-      var renderedH = vh * scale * dpr;
-      var offsetX = (renderedW - wrapperW * dpr) / 2;
-      var offsetY = (renderedH - wrapperH * dpr) / 2;
-      geo.renderedVideoSize = [renderedW, renderedH];
-      geo.videoOffset = [offsetX, offsetY];
-    }
+function centerLogo() {
+var w = logoImg.naturalWidth, h = logoImg.naturalHeight;
+if (!w || !h) return;
+var c = document.createElement('canvas');
+c.width = w; c.height = h;
+var ctx = c.getContext('2d');
+ctx.drawImage(logoImg, 0, 0, w, h);
+var data;
+try { data = ctx.getImageData(0, 0, w, h).data; } catch (e) { return; }
+var minX = w, maxX = 0;
+var step = Math.max(1, Math.floor(w / 300));
+for (var y = 0; y < h; y += step) {
+for (var x = 0; x < w; x += step) {
+if (data[(y * w + x) * 4 + 3] > 10) {
+if (x < minX) minX = x;
+if (x > maxX) maxX = x;
+}
+}
+}
+if (maxX <= minX) return;
+var contentCenter = (minX + maxX) / 2;
+var imgCenter = w / 2;
+var shiftPct = ((imgCenter - contentCenter) / w) * 100;
+logoImg.style.transform = 'translateX(' + shiftPct.toFixed(2) + '%)';
+}
 
-    var chipOffsetX = (chipRect.left - wrapperRect.left) * dpr;
-    var chipOffsetY = (chipRect.top - wrapperRect.top) * dpr;
-    geo.chipOffset = [chipOffsetX, chipOffsetY];
-    geo.canvasWidth = cw;
-    geo.canvasHeight = ch;
-
-    var radiusPx = parseFloat(getComputedStyle(chip).borderRadius) || 28;
-    geo.radius = radiusPx * dpr;
-    geo.edgeThickness = Math.max(4, radiusPx * 0.35) * dpr;
-    geo.refractStrength = 10 * dpr;
-    geo.dispersion = 2.2 * dpr;
-    geo.blurRadius = 9 * dpr;
-  }
-
-  window.addEventListener('resize', updateGeometry);
-  video.addEventListener('loadedmetadata', updateGeometry);
-
-  function render() {
-    requestAnimationFrame(render);
-    if (video.readyState < 2 || video.videoWidth === 0) return;
-
-    updateGeometry();
-    gl.viewport(0, 0, geo.canvasWidth, geo.canvasHeight);
-
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    try {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
-    } catch (e) {
-      return;
-    }
-
-    gl.useProgram(program);
-    gl.uniform2f(uCanvasSize, geo.canvasWidth, geo.canvasHeight);
-    gl.uniform1f(uRadius, geo.radius);
-    gl.uniform1f(uEdgeThickness, geo.edgeThickness);
-    gl.uniform1f(uRefractStrength, geo.refractStrength);
-    gl.uniform1f(uDispersion, geo.dispersion);
-    gl.uniform1f(uFresnelIntensity, 0.18);
-    gl.uniform1f(uBlurRadius, geo.blurRadius);
-    gl.uniform2f(uRenderedVideoSize, geo.renderedVideoSize[0], geo.renderedVideoSize[1]);
-    gl.uniform2f(uVideoOffset, geo.videoOffset[0], geo.videoOffset[1]);
-    gl.uniform2f(uChipOffset, geo.chipOffset[0], geo.chipOffset[1]);
-    gl.uniform1i(uVideoTex, 0);
-    gl.activeTexture(gl.TEXTURE0);
-
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
-  }
-
-  updateGeometry();
-  requestAnimationFrame(render);
+if (logoImg.complete && logoImg.naturalWidth) centerLogo();
+else logoImg.addEventListener('load', centerLogo);
 })();
 </script>
 
