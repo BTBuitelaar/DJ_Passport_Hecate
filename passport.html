@@ -508,26 +508,35 @@ try { srcData = offCtx.getImageData(0, 0, w, h).data; } catch (e) { return; }
 var outImg = ctx.createImageData(w, h);
 var od = outImg.data;
 
+function sampleBilinear(data, fx, fy, w, h, channel) {
+fx = fx < 0 ? 0 : (fx > w - 1 ? w - 1 : fx);
+fy = fy < 0 ? 0 : (fy > h - 1 ? h - 1 : fy);
+var x0 = Math.floor(fx), y0 = Math.floor(fy);
+var x1 = x0 + 1 > w - 1 ? w - 1 : x0 + 1;
+var y1 = y0 + 1 > h - 1 ? h - 1 : y0 + 1;
+var tx = fx - x0, ty = fy - y0;
+var p00 = data[(y0 * w + x0) * 4 + channel];
+var p10 = data[(y0 * w + x1) * 4 + channel];
+var p01 = data[(y1 * w + x0) * 4 + channel];
+var p11 = data[(y1 * w + x1) * 4 + channel];
+var top = p00 + (p10 - p00) * tx;
+var bot = p01 + (p11 - p01) * tx;
+return top + (bot - top) * ty;
+}
+
 for (var y = 0; y < h; y++) {
 for (var x = 0; x < w; x++) {
 var i = y * w + x;
 var gx = dxMap[i], gy = dyMap[i];
 
-var rx = clampCoord(Math.round(x + gx * scaleR), w);
-var ry = clampCoord(Math.round(y + gy * scaleR), h);
-var gxi = clampCoord(Math.round(x + gx * scaleG), w);
-var gyi = clampCoord(Math.round(y + gy * scaleG), h);
-var bxi = clampCoord(Math.round(x + gx * scaleB), w);
-var byi = clampCoord(Math.round(y + gy * scaleB), h);
-
-var ridx = (ry * w + rx) * 4;
-var gidx = (gyi * w + gxi) * 4;
-var bidx = (byi * w + bxi) * 4;
+var rVal = sampleBilinear(srcData, x + gx * scaleR, y + gy * scaleR, w, h, 0);
+var gVal = sampleBilinear(srcData, x + gx * scaleG, y + gy * scaleG, w, h, 1);
+var bVal = sampleBilinear(srcData, x + gx * scaleB, y + gy * scaleB, w, h, 2);
 
 var oidx = i * 4;
-od[oidx] = srcData[ridx];
-od[oidx + 1] = srcData[gidx + 1];
-od[oidx + 2] = srcData[bidx + 2];
+od[oidx] = rVal;
+od[oidx + 1] = gVal;
+od[oidx + 2] = bVal;
 od[oidx + 3] = 255;
 }
 }
